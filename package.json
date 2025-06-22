@@ -10,9 +10,16 @@
     "test": "jest"
   },
   "dependencies": {
+    "@react-native/new-app-screen": "0.80.0",
+    "@react-navigation/material-top-tabs": "^7.3.0",
+    "@react-navigation/native": "^7.1.14",
     "react": "19.1.0",
     "react-native": "0.80.0",
-    "@react-native/new-app-screen": "0.80.0"
+    "react-native-file-picker": "^0.0.21",
+    "react-native-file-viewer": "^2.1.5",
+    "react-native-fs": "^2.20.0",
+    "react-native-pager-view": "^6.8.1",
+    "react-native-tab-view": "^4.1.2"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
