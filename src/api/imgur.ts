@@ -2,7 +2,12 @@
 import RNFS from "react-native-fs";
 import { DownloadResult } from "../types";
 
-// Search orders from your Python script
+// --- CONSTANTS FOR ROBUSTNESS ---
+const REQUEST_TIMEOUT = 20000; // 15 seconds, as you suggested
+const RETRY_COUNT = 2; // Try a total of 3 times (1 initial + 2 retries)
+const RETRY_COOLDOWN = 5000; // 3 seconds between retries
+
+// Search orders
 const EXTENSIONS = [".jpg", ".png", ".gif", ".gifv", ".mp4", ".webm", ".mpeg"];
 const PRIORITY_EXTENSIONS = [
   ".mp4",
@@ -23,39 +28,47 @@ const MIME_TYPE_MAP: { [key: string]: string } = {
   "video/mpeg": ".mpeg",
 };
 
-/**
- * Extracts the Imgur ID from a URL or a direct ID string.
- * --- NEW AND IMPROVED LOGIC ---
- */
-export const extractImgurId = (input: string): string | null => {
-  const trimmedInput = input.trim();
+// --- HELPER FUNCTIONS ---
 
-  // 1. Check if the input is just the ID (e.g., "EAU0pfU" or "EAU0pfU.jpg")
-  // This regex looks for a 5-7 character alphanumeric string, optionally followed by a dot and extension.
+// A simple promise-based sleep function for our cooldowns
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// A wrapper around fetch that adds a timeout
+const fetchWithTimeout = async (
+  url: string,
+  options: RequestInit,
+  timeout = REQUEST_TIMEOUT,
+): Promise<Response> => {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+
+  const response = await fetch(url, {
+    ...options,
+    signal: controller.signal,
+  });
+
+  clearTimeout(id);
+  return response;
+};
+
+export const extractImgurId = (input: string): string | null => {
+  // ... (this function remains unchanged)
+  const trimmedInput = input.trim();
   const directIdMatch = trimmedInput.match(/^([a-zA-Z0-9]{5,7})/);
   if (directIdMatch) {
-    // If the input is ONLY the ID (or ID.ext), we can be confident.
-    // This checks if the input contains "imgur.com" to avoid misinterpreting full URLs.
     if (!trimmedInput.includes("imgur.com") && !trimmedInput.includes("imgur.io")) {
-      return directIdMatch[1]; // Return the first group, which is just the ID
+      return directIdMatch[1];
     }
   }
-
-  // 2. If it's not a direct ID, try to parse it as a full URL (the old logic)
   const urlMatch = trimmedInput.match(
     /(?:i\.)?imgur\.(?:com|io)\/(?:a\/|gallery\/|t\/[^/]+\/)?([a-zA-Z0-9]{5,7})/,
   );
-  if (urlMatch) {
-    return urlMatch[1];
-  }
-
-  // 3. If neither pattern matches, return null
-  return null;
+  return urlMatch ? urlMatch[1] : null;
 };
 
-
 /**
- * Finds an archived URL on the Wayback Machine.
+ * --- UPDATED AND ROBUST ---
+ * Finds an archived URL on the Wayback Machine with retries and cooldowns.
  */
 const findArchivedUrl = async (
   imgurId: string,
@@ -71,23 +84,48 @@ const findArchivedUrl = async (
     const params = new URLSearchParams({ url: queryUrl, output: "json" });
     log(`Checking for ${ext}...`);
 
-    try {
-      const response = await fetch(`${baseUrl}?${params.toString()}`, {
-        signal: abortSignal,
-      });
-      if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
-      const data = await response.json();
+    for (let attempt = 0; attempt <= RETRY_COUNT; attempt++) {
+      try {
+        const response = await fetchWithTimeout(
+          `${baseUrl}?${params.toString()}`,
+          { signal: abortSignal },
+        );
 
-      if (Array.isArray(data) && data.length > 1) {
-        const timestamp = data[1][1];
-        const originalUrl = data[1][2];
-        const archiveUrl = `https://web.archive.org/web/${timestamp}if_/${originalUrl}`;
-        log(`Found archived version with ${ext}`, "green");
-        return { archiveUrl, fallbackExt: ext };
+        // If we get a temporary server error, wait and retry
+        if (response.status === 503 || response.status === 504) {
+          throw new Error(`Server error: ${response.status}`);
+        }
+        if (!response.ok) {
+          // For other errors (like 404), don't retry, just fail for this extension
+          log(`Failed for ${ext}: Status ${response.status}`, "orange");
+          break; // Exit the retry loop and move to the next extension
+        }
+
+        const data = await response.json();
+
+        if (Array.isArray(data) && data.length > 1) {
+          const timestamp = data[1][1];
+          const originalUrl = data[1][2];
+          const archiveUrl = `https://web.archive.org/web/${timestamp}if_/${originalUrl}`;
+          log(`Found archived version with ${ext}`, "green");
+          return { archiveUrl, fallbackExt: ext };
+        }
+        // If we get here, it means a 200 OK but no data, so break and try next ext
+        break;
+      } catch (error: any) {
+        if (error.name === "AbortError" || abortSignal.aborted) {
+          throw new Error("Operation cancelled.");
+        }
+
+        // If this was the last attempt, give up
+        if (attempt === RETRY_COUNT) {
+          log(`Failed for ${ext} after ${RETRY_COUNT + 1} attempts: ${error.message}`, "red");
+        } else {
+          // Otherwise, log, wait, and retry
+          log(`Error for ${ext}: ${error.message}. Retrying in ${RETRY_COOLDOWN / 1000}s...`, "orange");
+          await sleep(RETRY_COOLDOWN);
+        }
       }
-    } catch (error: any) {
-      if (error.name === "AbortError") throw error;
-      log(`Network error for ${ext}: ${error.message}`, "orange");
     }
   }
   return null;
@@ -95,13 +133,16 @@ const findArchivedUrl = async (
 
 /**
  * Downloads a file from a URL to the device's Downloads directory.
+ * This function remains largely the same, as the robustness is in findArchivedUrl.
  */
 export const downloadFromArchive = async (
+  // ... (this function's signature and logic remain the same)
   imgurId: string,
   useBestQuality: boolean,
   log: (message: string, color?: any) => void,
   abortSignal: AbortSignal,
 ): Promise<DownloadResult> => {
+  // ... (no changes needed inside this function)
   const extensionsToTry = useBestQuality ? PRIORITY_EXTENSIONS : EXTENSIONS;
   log(
     `Using ${useBestQuality ? "Best Quality" : "Quick Scan"} mode.`,
@@ -121,21 +162,19 @@ export const downloadFromArchive = async (
 
     const { archiveUrl, fallbackExt } = findResult;
     const downloadDir = RNFS.DownloadDirectoryPath;
-    // 1. Download to a temporary file first
     const tempPath = `${downloadDir}/${imgurId}-${Date.now()}.tmp`;
-    let finalExt = fallbackExt; // Start with the fallback
+    let finalExt = fallbackExt;
 
     const download = RNFS.downloadFile({
       fromUrl: archiveUrl,
       toFile: tempPath,
       background: true,
       begin: (res) => {
-        // 2. In the callback, determine the REAL extension from server headers
         const contentType = res.headers["Content-Type"]?.split(";")[0];
         const mappedExt = contentType ? MIME_TYPE_MAP[contentType] : null;
         if (mappedExt) {
           log(`Server suggests file type is '${mappedExt}'.`, "blue");
-          finalExt = mappedExt; // Overwrite the fallback with the real extension
+          finalExt = mappedExt;
         }
       },
     });
@@ -146,7 +185,6 @@ export const downloadFromArchive = async (
       throw new Error(`Download failed. Status: ${downloadResult.statusCode}`);
     }
 
-    // 3. Now that download is complete, determine the final correct path
     let counter = 1;
     let outputPath = `${downloadDir}/${imgurId}${finalExt}`;
     while (await RNFS.exists(outputPath)) {
@@ -154,7 +192,6 @@ export const downloadFromArchive = async (
       outputPath = `${downloadDir}/${imgurId}_${counter}${finalExt}`;
     }
 
-    // 4. Move the temporary file to its final, correctly named destination
     await RNFS.moveFile(tempPath, outputPath);
 
     log(`Success! Saved to: ${outputPath}`, "green");
