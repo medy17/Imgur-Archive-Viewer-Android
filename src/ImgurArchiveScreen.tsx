@@ -11,14 +11,17 @@ import {
 } from "react-native";
 import { createMaterialTopTabNavigator } from "@react-navigation/material-top-tabs";
 import { downloadFromArchive, extractImgurId } from "./api/imgur";
-import { LogEntry, DownloadResult } from "./types";
+import { LogEntry } from "./types";
 import SingleDownloadTab from "./screens/SingleDownloadTab";
 import BatchDownloadTab from "./screens/BatchDownloadTab";
 import LogView from "./components/LogView";
 import Preview from "./components/Preview";
-import { openFile, readBatchFile } from "./utils/fileManager";
+import { readBatchFile, openFile } from "./utils/fileManager";
 
 const Tab = createMaterialTopTabNavigator();
+
+// Helper function for cooldowns
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const ImgurArchiveScreen = () => {
   const [isBestQuality, setIsBestQuality] = useState(false);
@@ -48,8 +51,12 @@ const ImgurArchiveScreen = () => {
     abortController.current = new AbortController();
   };
 
+  /**
+   * --- MODIFIED ---
+   * Now returns a boolean indicating success or failure.
+   */
   const handleDownload = useCallback(
-    async (imgurId: string): Promise<DownloadResult> => {
+    async (imgurId: string): Promise<boolean> => {
       addLog(`Processing ID: ${imgurId}`, "blue");
       const result = await downloadFromArchive(
         imgurId,
@@ -63,10 +70,32 @@ const ImgurArchiveScreen = () => {
       } else if (result.error) {
         addLog(`Failed for ID ${imgurId}: ${result.error}`, "red");
       }
-      return result;
+      return result.success;
     },
     [isBestQuality, addLog],
   );
+
+  /**
+   * --- NEW FUNCTION ---
+   * Handles the logic for retrying a list of failed IDs.
+   */
+  const runRetryProcess = async (idsToRetry: string[]) => {
+    addLog(`--- Retrying ${idsToRetry.length} failed downloads... ---`, "purple");
+    for (let i = 0; i < idsToRetry.length; i++) {
+      if (abortController.current?.signal.aborted) {
+        addLog("Retry process cancelled.", "orange");
+        break;
+      }
+      const id = idsToRetry[i];
+      // We don't need to collect failures again, just attempt the download.
+      await handleDownload(id);
+
+      if (i < idsToRetry.length - 1) {
+        await sleep(500); // Polite cooldown
+      }
+    }
+    addLog("--- Retry process finished. ---", "purple");
+  };
 
   const startSingleDownload = async (url: string) => {
     if (!url) {
@@ -84,8 +113,14 @@ const ImgurArchiveScreen = () => {
     setIsProcessing(false);
   };
 
+  /**
+   * --- MODIFIED ---
+   * Now collects failed IDs and prompts the user to retry.
+   */
   const startBatchDownload = async () => {
     resetState();
+    const localFailedIds: string[] = []; // Use a local array to track failures
+
     try {
       const urls = await readBatchFile(addLog);
       if (!urls) {
@@ -106,9 +141,36 @@ const ImgurArchiveScreen = () => {
           addLog(`Skipping invalid URL: ${url}`, "orange");
           continue;
         }
-        await handleDownload(imgurId);
+
+        const success = await handleDownload(imgurId);
+        if (!success) {
+          localFailedIds.push(imgurId); // Add failed ID to our list
+        }
+
+        if (i < urls.length - 1) {
+          await sleep(500);
+        }
       }
-      addLog("Batch process completed.", "green");
+      addLog("Initial batch process completed.", "green");
+
+      // After the loop, check if there were any failures
+      if (localFailedIds.length > 0 && !abortController.current?.signal.aborted) {
+        Alert.alert(
+          "Retry Failed Downloads?",
+          `${localFailedIds.length} download(s) failed. This can happen due to temporary network or server issues. Would you like to try them again?`,
+          [
+            {
+              text: "No, Thanks",
+              style: "cancel",
+              onPress: () => addLog("Skipping retry for failed downloads.", "orange"),
+            },
+            {
+              text: "Retry",
+              onPress: () => runRetryProcess(localFailedIds),
+            },
+          ],
+        );
+      }
     } catch (error: any) {
       addLog(`Batch process failed: ${error.message}`, "red");
     } finally {
@@ -135,7 +197,6 @@ const ImgurArchiveScreen = () => {
             trackColor={{ false: "#767577", true: "#81b0ff" }}
             thumbColor={isBestQuality ? "#f5dd4b" : "#f4f3f4"}
             onValueChange={setIsBestQuality}
-            value={isBestQuality}
             disabled={isProcessing}
           />
         </View>
@@ -170,7 +231,7 @@ const ImgurArchiveScreen = () => {
           {isProcessing ? (
             <ActivityIndicator size="large" color="#0000ff" />
           ) : (
-            <View style={{ width: 40 }} /> // Placeholder for spacing
+            <View style={{ width: 40 }} />
           )}
           <Button
             title="Cancel"
@@ -188,7 +249,7 @@ const ImgurArchiveScreen = () => {
   );
 };
 
-// ... Add Styles ...
+// ... Styles remain the same ...
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 10, backgroundColor: "#fff" },
   configSection: {
