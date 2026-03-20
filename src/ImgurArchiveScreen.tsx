@@ -13,6 +13,7 @@ import {
   Switch,
   Text,
 } from "react-native-paper";
+import MaterialCommunityIcons from "react-native-vector-icons/MaterialCommunityIcons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { downloadFromArchive, extractImgurId } from "./api/imgur";
 import { LogEntry, QueueItem } from "./types";
@@ -32,10 +33,32 @@ const flatShadow = {
   shadowRadius: 0,
   shadowOffset: { width: 0, height: 0 },
 } as const;
+const tabIcons = {
+  single: { active: "numeric-1-circle", inactive: "numeric-1-circle-outline" },
+  batch: {
+    active: "format-list-bulleted-square",
+    inactive: "format-list-bulleted-square",
+  },
+  gallery: { active: "image-multiple", inactive: "image-multiple-outline" },
+  logs: { active: "text-box-search", inactive: "text-box-search-outline" },
+} as const;
 const routes = [
-  { key: "single", title: "Single", focusedIcon: "link-variant" },
-  { key: "batch", title: "Batch", focusedIcon: "format-list-bulleted" },
-  { key: "gallery", title: "Gallery", focusedIcon: "image-multiple-outline" },
+  {
+    key: "single",
+    title: "Single",
+  },
+  {
+    key: "batch",
+    title: "Batch",
+  },
+  {
+    key: "gallery",
+    title: "Gallery",
+  },
+  {
+    key: "logs",
+    title: "Logs",
+  },
 ] as const;
 
 const ImgurArchiveScreen = () => {
@@ -248,6 +271,10 @@ const ImgurArchiveScreen = () => {
     }
   };
 
+  const clearLogs = () => {
+    setLogs([]);
+  };
+
   const renderModeContent = () => {
     if (activeRoute.key === "single") {
       return (
@@ -272,6 +299,26 @@ const ImgurArchiveScreen = () => {
     );
   };
 
+  const renderBottomBarIcon = ({
+    route,
+    focused,
+    color,
+  }: {
+    route: (typeof routes)[number];
+    focused: boolean;
+    color: string;
+  }) => {
+    const names = tabIcons[route.key];
+
+    return (
+      <MaterialCommunityIcons
+        name={focused ? names.active : names.inactive}
+        size={24}
+        color={color}
+      />
+    );
+  };
+
   return (
     <View style={styles.screen}>
       {activeRoute.key === "gallery" ? (
@@ -283,6 +330,15 @@ const ImgurArchiveScreen = () => {
         >
           {renderModeContent()}
         </View>
+      ) : activeRoute.key === "logs" ? (
+        <LogView
+          logs={logs}
+          onClear={clearLogs}
+          style={[
+            styles.logsContainer,
+            { marginBottom: 16 + insets.bottom },
+          ]}
+        />
       ) : (
         <ScrollView
           style={styles.container}
@@ -315,21 +371,24 @@ const ImgurArchiveScreen = () => {
                   Open Latest File
                 </Button>
                 <Button
-                  mode="outlined"
+                  mode="contained"
                   onPress={cancelProcess}
                   disabled={!isProcessing}
+                  buttonColor="#B3261E"
+                  textColor="#FFF1F0"
                   style={styles.secondaryButton}
                   contentStyle={styles.actionButtonContent}
                 >
                   Cancel Run
                 </Button>
               </View>
-              <QueueView items={queueItems} />
+              <QueueView items={queueItems} isProcessing={isProcessing} />
             </View>
           </View>
 
-          <View style={[styles.outputSection, isWideLayout && styles.outputSectionWide]}>
-            <LogView logs={logs} />
+          <View
+            style={[styles.outputSection, isWideLayout && styles.outputSectionWide]}
+          >
             <Preview filePath={lastDownloadPath} />
           </View>
         </ScrollView>
@@ -340,7 +399,9 @@ const ImgurArchiveScreen = () => {
         onTabPress={({ route }) => {
           setTabIndex(routes.findIndex((item) => item.key === route.key));
         }}
+        renderIcon={renderBottomBarIcon}
         style={styles.bottomBar}
+        activeIndicatorStyle={styles.bottomBarIndicator}
         safeAreaInsets={{ bottom: insets.bottom }}
       />
     </View>
@@ -360,6 +421,10 @@ const styles = StyleSheet.create({
     paddingBottom: 28,
   },
   galleryContainer: {
+    flex: 1,
+    padding: 16,
+  },
+  logsContainer: {
     flex: 1,
     padding: 16,
   },
@@ -407,6 +472,9 @@ const styles = StyleSheet.create({
     borderTopColor: "#2A3137",
     backgroundColor: "#161A1D",
     ...flatShadow,
+  },
+  bottomBarIndicator: {
+    backgroundColor: "#262D33",
   },
 });
 

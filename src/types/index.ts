@@ -2,7 +2,7 @@
 export interface LogEntry {
   id: number;
   message: string;
-  color: "green" | "red" | "orange" | "blue" | "purple" | "black";
+  color: string;
 }
 
 export interface DownloadResult {
@@ -24,6 +24,6 @@ export interface QueueItem {
 export interface GalleryItem {
   path: string;
   name: string;
-  type: "image" | "video" | "file";
+  type: "image" | "gif" | "video" | "file";
   modifiedAt: number;
 }
