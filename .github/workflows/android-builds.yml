@@ -2,10 +2,24 @@ name: Android Builds
 
 on:
   workflow_dispatch:
+    inputs:
+      draft_release:
+        description: Create the release as a draft.
+        required: false
+        default: true
+        type: boolean
   push:
     branches:
       - main
+    tags:
+      - "v*"
   pull_request:
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-android:
@@ -28,7 +42,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - uses: actions/setup-java@v4
@@ -84,3 +98,124 @@ jobs:
         with:
           name: android-${{ matrix.name }}-release
           path: android/app/build/outputs/apk/imgur-archive-viewer-${{ matrix.name }}-release.apk
+
+  publish-release:
+    runs-on: ubuntu-latest
+    needs: build-android
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download APK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: android-*-release
+          path: release-assets
+          merge-multiple: true
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if [[ -z "$VERSION" ]]; then
+            echo "package.json version is empty"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release version
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            REF_TAG="${GITHUB_REF#refs/tags/}"
+            if [[ "$REF_TAG" != "$TAG" ]]; then
+              echo "Git tag $REF_TAG does not match package.json version tag $TAG"
+              exit 1
+            fi
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists"
+            exit 1
+          fi
+
+          gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > releases.json
+
+          node - "$VERSION" <<'EOF'
+          const fs = require("fs");
+          const current = process.argv[2];
+          const releases = JSON.parse(fs.readFileSync("releases.json", "utf8"));
+
+          const parse = (value) => {
+            const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(value || "");
+            return match ? match.slice(1).map(Number) : null;
+          };
+
+          const compare = (a, b) => {
+            for (let i = 0; i < 3; i += 1) {
+              if (a[i] !== b[i]) {
+                return a[i] - b[i];
+              }
+            }
+            return 0;
+          };
+
+          const currentVersion = parse(current);
+          if (!currentVersion) {
+            console.error(`package.json version is not strict semver: ${current}`);
+            process.exit(1);
+          }
+
+          const latest = releases
+            .map((release) => parse(release.tag_name))
+            .filter(Boolean)
+            .sort(compare)
+            .pop();
+
+          if (latest && compare(currentVersion, latest) <= 0) {
+            console.error(
+              `package.json version ${current} must be greater than latest release ${latest.join(".")}`,
+            );
+            process.exit(1);
+          }
+          EOF
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_DRAFT: ${{ github.event.inputs.draft_release }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            DRAFT="false"
+          else
+            DRAFT="${INPUT_DRAFT:-true}"
+          fi
+
+          ls -R release-assets
+
+          if [[ "$DRAFT" == "true" ]]; then
+            gh release create "$TAG" release-assets/*.apk \
+              --title "$TAG" \
+              --notes "Automated Android build artifacts." \
+              --draft
+          else
+            gh release create "$TAG" release-assets/*.apk \
+              --title "$TAG" \
+              --notes "Automated Android build artifacts."
+          fi
