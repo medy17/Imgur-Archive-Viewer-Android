@@ -137,3 +137,18 @@ dependencies {
         implementation jscFlavor
     }
 }
+
+gradle.projectsEvaluated {
+    if (project.hasProperty("newArchEnabled") && project.newArchEnabled == "true") {
+        def codegenTasks = rootProject.allprojects.collectMany { subproject ->
+            subproject.tasks.matching { task ->
+                task.name == "generateCodegenSchemaFromJavaScript" ||
+                    task.name == "generateCodegenArtifactsFromSchema"
+            }.toList()
+        }
+
+        tasks.matching { task -> task.name.startsWith("configureCMake") }.configureEach {
+            dependsOn(codegenTasks)
+        }
+    }
+}
