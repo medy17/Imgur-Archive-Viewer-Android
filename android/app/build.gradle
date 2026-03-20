@@ -96,8 +96,11 @@ android {
 
     signingConfigs {
         release {
-            if (
+            def hasReleaseKeystore =
                 project.hasProperty('MYAPP_UPLOAD_STORE_FILE') &&
+                file(MYAPP_UPLOAD_STORE_FILE).exists()
+            if (
+                hasReleaseKeystore &&
                 project.hasProperty('MYAPP_UPLOAD_STORE_PASSWORD') &&
                 project.hasProperty('MYAPP_UPLOAD_KEY_ALIAS') &&
                 project.hasProperty('MYAPP_UPLOAD_KEY_PASSWORD')
