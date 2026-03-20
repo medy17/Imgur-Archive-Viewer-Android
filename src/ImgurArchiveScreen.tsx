@@ -1,40 +1,62 @@
 // src/ImgurArchiveScreen.tsx
 import React, { useState, useCallback, useRef } from "react";
 import {
-  View,
-  Text,
+  ScrollView,
   StyleSheet,
-  Switch,
-  Button,
   Alert,
-  ActivityIndicator,
+  View,
+  useWindowDimensions,
 } from "react-native";
-import { createMaterialTopTabNavigator } from "@react-navigation/material-top-tabs";
+import {
+  Button,
+  BottomNavigation,
+  Switch,
+  Text,
+} from "react-native-paper";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { downloadFromArchive, extractImgurId } from "./api/imgur";
-import { LogEntry } from "./types";
+import { LogEntry, QueueItem } from "./types";
 import SingleDownloadTab from "./screens/SingleDownloadTab";
 import BatchDownloadTab from "./screens/BatchDownloadTab";
+import GalleryTab from "./screens/GalleryTab";
 import LogView from "./components/LogView";
 import Preview from "./components/Preview";
+import QueueView from "./components/QueueView";
 import { readBatchFile, openFile } from "./utils/fileManager";
 
-const Tab = createMaterialTopTabNavigator();
-
-// Helper function for cooldowns
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const flatShadow = {
+  elevation: 0,
+  shadowColor: "transparent",
+  shadowOpacity: 0,
+  shadowRadius: 0,
+  shadowOffset: { width: 0, height: 0 },
+} as const;
+const routes = [
+  { key: "single", title: "Single", focusedIcon: "link-variant" },
+  { key: "batch", title: "Batch", focusedIcon: "format-list-bulleted" },
+  { key: "gallery", title: "Gallery", focusedIcon: "image-multiple-outline" },
+] as const;
 
 const ImgurArchiveScreen = () => {
+  const { width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const isWideLayout = width >= 900;
+  const [tabIndex, setTabIndex] = useState(0);
   const [isBestQuality, setIsBestQuality] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [lastDownloadPath, setLastDownloadPath] = useState<string | null>(null);
   const logCounter = useRef(0);
+  const queueCounter = useRef(0);
   const abortController = useRef<AbortController | null>(null);
+  const activeRoute = routes[tabIndex] ?? routes[0];
 
   const addLog = useCallback(
     (
       message: string,
-      color: LogEntry["color"] = "black",
+      color: LogEntry["color"] = "#F1F0F3",
     ) => {
       setLogs((prevLogs) => [
         ...prevLogs,
@@ -46,39 +68,73 @@ const ImgurArchiveScreen = () => {
 
   const resetState = () => {
     setLogs([]);
+    setQueueItems([]);
     setIsProcessing(true);
     setLastDownloadPath(null);
     abortController.current = new AbortController();
   };
 
-  /**
-   * --- MODIFIED ---
-   * Now returns a boolean indicating success or failure.
-   */
+  const addQueueItem = useCallback((imgurId: string) => {
+    const id = `${imgurId}-${queueCounter.current++}`;
+    setQueueItems((prevItems) => [
+      ...prevItems,
+      {
+        id,
+        imgurId,
+        label: imgurId,
+        progress: null,
+        state: "searching",
+      },
+    ]);
+    return id;
+  }, []);
+
+  const updateQueueItem = useCallback(
+    (id: string, patch: Partial<QueueItem>) => {
+      setQueueItems((prevItems) =>
+        prevItems.map((item) =>
+          item.id === id ? { ...item, ...patch } : item,
+        ),
+      );
+    },
+    [],
+  );
+
   const handleDownload = useCallback(
-    async (imgurId: string): Promise<boolean> => {
+    async (imgurId: string, queueId: string): Promise<boolean> => {
       addLog(`Processing ID: ${imgurId}`, "blue");
       const result = await downloadFromArchive(
         imgurId,
         isBestQuality,
         addLog,
         abortController.current!.signal,
+        (progress) => {
+          updateQueueItem(queueId, {
+            progress,
+            state: progress === null ? "searching" : "downloading",
+          });
+        },
       );
 
       if (result.success && result.path) {
         setLastDownloadPath(result.path);
+        updateQueueItem(queueId, {
+          progress: 1,
+          path: result.path,
+          state: "completed",
+        });
       } else if (result.error) {
+        updateQueueItem(queueId, {
+          error: result.error,
+          state: result.error.includes("cancelled") ? "cancelled" : "failed",
+        });
         addLog(`Failed for ID ${imgurId}: ${result.error}`, "red");
       }
       return result.success;
     },
-    [isBestQuality, addLog],
+    [isBestQuality, addLog, updateQueueItem],
   );
 
-  /**
-   * --- NEW FUNCTION ---
-   * Handles the logic for retrying a list of failed IDs.
-   */
   const runRetryProcess = async (idsToRetry: string[]) => {
     addLog(`--- Retrying ${idsToRetry.length} failed downloads... ---`, "purple");
     for (let i = 0; i < idsToRetry.length; i++) {
@@ -87,15 +143,34 @@ const ImgurArchiveScreen = () => {
         break;
       }
       const id = idsToRetry[i];
-      // We don't need to collect failures again, just attempt the download.
-      await handleDownload(id);
+      const queueId = addQueueItem(id);
+      await handleDownload(id, queueId);
 
       if (i < idsToRetry.length - 1) {
-        await sleep(500); // Polite cooldown
+        await sleep(500);
       }
     }
     addLog("--- Retry process finished. ---", "purple");
   };
+
+  const askToRetryFailedIds = (failedIds: string[]) =>
+    new Promise<boolean>((resolve) => {
+      Alert.alert(
+        "Retry Failed Downloads?",
+        `${failedIds.length} download(s) failed. This can happen due to temporary network or server issues. Would you like to try them again?`,
+        [
+          {
+            text: "No, Thanks",
+            style: "cancel",
+            onPress: () => resolve(false),
+          },
+          {
+            text: "Retry",
+            onPress: () => resolve(true),
+          },
+        ],
+      );
+    });
 
   const startSingleDownload = async (url: string) => {
     if (!url) {
@@ -109,17 +184,14 @@ const ImgurArchiveScreen = () => {
       setIsProcessing(false);
       return;
     }
-    await handleDownload(imgurId);
+    const queueId = addQueueItem(imgurId);
+    await handleDownload(imgurId, queueId);
     setIsProcessing(false);
   };
 
-  /**
-   * --- MODIFIED ---
-   * Now collects failed IDs and prompts the user to retry.
-   */
   const startBatchDownload = async () => {
     resetState();
-    const localFailedIds: string[] = []; // Use a local array to track failures
+    const localFailedIds: string[] = [];
 
     try {
       const urls = await readBatchFile(addLog);
@@ -142,9 +214,10 @@ const ImgurArchiveScreen = () => {
           continue;
         }
 
-        const success = await handleDownload(imgurId);
+        const queueId = addQueueItem(imgurId);
+        const success = await handleDownload(imgurId, queueId);
         if (!success) {
-          localFailedIds.push(imgurId); // Add failed ID to our list
+          localFailedIds.push(imgurId);
         }
 
         if (i < urls.length - 1) {
@@ -153,23 +226,13 @@ const ImgurArchiveScreen = () => {
       }
       addLog("Initial batch process completed.", "green");
 
-      // After the loop, check if there were any failures
       if (localFailedIds.length > 0 && !abortController.current?.signal.aborted) {
-        Alert.alert(
-          "Retry Failed Downloads?",
-          `${localFailedIds.length} download(s) failed. This can happen due to temporary network or server issues. Would you like to try them again?`,
-          [
-            {
-              text: "No, Thanks",
-              style: "cancel",
-              onPress: () => addLog("Skipping retry for failed downloads.", "orange"),
-            },
-            {
-              text: "Retry",
-              onPress: () => runRetryProcess(localFailedIds),
-            },
-          ],
-        );
+        const shouldRetry = await askToRetryFailedIds(localFailedIds);
+        if (shouldRetry) {
+          await runRetryProcess(localFailedIds);
+        } else {
+          addLog("Skipping retry for failed downloads.", "orange");
+        }
       }
     } catch (error: any) {
       addLog(`Batch process failed: ${error.message}`, "red");
@@ -185,100 +248,165 @@ const ImgurArchiveScreen = () => {
     }
   };
 
+  const renderModeContent = () => {
+    if (activeRoute.key === "single") {
+      return (
+        <SingleDownloadTab
+          onDownload={startSingleDownload}
+          isProcessing={isProcessing}
+        />
+      );
+    }
+
+    return activeRoute.key === "batch" ? (
+      <BatchDownloadTab
+        onDownload={startBatchDownload}
+        isProcessing={isProcessing}
+      />
+    ) : (
+      <GalleryTab
+        active={activeRoute.key === "gallery"}
+        refreshKey={lastDownloadPath}
+        onOpenFile={(path) => openFile(path, addLog)}
+      />
+    );
+  };
+
   return (
-    <View style={styles.container}>
-      <View style={styles.configSection}>
-        <Text style={styles.sectionTitle}>Configuration</Text>
-        <View style={styles.switchContainer}>
-          <Text style={styles.switchLabel}>
-            Search for best quality (slower)
-          </Text>
-          <Switch
-            trackColor={{ false: "#767577", true: "#81b0ff" }}
-            thumbColor={isBestQuality ? "#f5dd4b" : "#f4f3f4"}
-            onValueChange={setIsBestQuality}
-            disabled={isProcessing}
-          />
+    <View style={styles.screen}>
+      {activeRoute.key === "gallery" ? (
+        <View
+          style={[
+            styles.galleryContainer,
+            { paddingBottom: 16 + insets.bottom },
+          ]}
+        >
+          {renderModeContent()}
         </View>
-      </View>
+      ) : (
+        <ScrollView
+          style={styles.container}
+          contentContainerStyle={[
+            styles.contentContainer,
+            { paddingBottom: 28 + insets.bottom },
+          ]}
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={[styles.topSection, isWideLayout && styles.topSectionWide]}>
+            <View style={styles.modeColumn}>{renderModeContent()}</View>
 
-      <Tab.Navigator>
-        <Tab.Screen name="Single">
-          {() => (
-            <SingleDownloadTab
-              onDownload={startSingleDownload}
-              isProcessing={isProcessing}
-            />
-          )}
-        </Tab.Screen>
-        <Tab.Screen name="Batch">
-          {() => (
-            <BatchDownloadTab
-              onDownload={startBatchDownload}
-              isProcessing={isProcessing}
-            />
-          )}
-        </Tab.Screen>
-      </Tab.Navigator>
+            <View style={styles.controlsPanel}>
+              <View style={styles.preferenceRow}>
+                <Text variant="titleMedium">Best Quality</Text>
+                <Switch
+                  value={isBestQuality}
+                  onValueChange={setIsBestQuality}
+                  disabled={isProcessing}
+                />
+              </View>
+              <View style={styles.actionButtons}>
+                <Button
+                  mode="contained"
+                  onPress={() => openFile(lastDownloadPath, addLog)}
+                  disabled={!lastDownloadPath || isProcessing}
+                  style={styles.primaryButton}
+                  contentStyle={styles.actionButtonContent}
+                >
+                  Open Latest File
+                </Button>
+                <Button
+                  mode="outlined"
+                  onPress={cancelProcess}
+                  disabled={!isProcessing}
+                  style={styles.secondaryButton}
+                  contentStyle={styles.actionButtonContent}
+                >
+                  Cancel Run
+                </Button>
+              </View>
+              <QueueView items={queueItems} />
+            </View>
+          </View>
 
-      <View style={styles.outputSection}>
-        <View style={styles.actionButtons}>
-          <Button
-            title="Open Last File"
-            onPress={() => openFile(lastDownloadPath, addLog)}
-            disabled={!lastDownloadPath || isProcessing}
-          />
-          {isProcessing ? (
-            <ActivityIndicator size="large" color="#0000ff" />
-          ) : (
-            <View style={{ width: 40 }} />
-          )}
-          <Button
-            title="Cancel"
-            onPress={cancelProcess}
-            disabled={!isProcessing}
-            color="red"
-          />
-        </View>
-        <View style={styles.panedWindow}>
-          <LogView logs={logs} />
-          <Preview filePath={lastDownloadPath} />
-        </View>
-      </View>
+          <View style={[styles.outputSection, isWideLayout && styles.outputSectionWide]}>
+            <LogView logs={logs} />
+            <Preview filePath={lastDownloadPath} />
+          </View>
+        </ScrollView>
+      )}
+
+      <BottomNavigation.Bar
+        navigationState={{ index: tabIndex, routes: [...routes] }}
+        onTabPress={({ route }) => {
+          setTabIndex(routes.findIndex((item) => item.key === route.key));
+        }}
+        style={styles.bottomBar}
+        safeAreaInsets={{ bottom: insets.bottom }}
+      />
     </View>
   );
 };
 
-// ... Styles remain the same ...
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 10, backgroundColor: "#fff" },
-  configSection: {
-    padding: 10,
-    borderWidth: 1,
-    borderColor: "#ccc",
-    borderRadius: 8,
-    marginBottom: 10,
-  },
-  sectionTitle: { fontSize: 16, fontWeight: "bold", marginBottom: 10 },
-  switchContainer: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  switchLabel: { fontSize: 14, flex: 1 },
-  outputSection: { flex: 1, marginTop: 10 },
-  actionButtons: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 10,
-  },
-  panedWindow: {
+  screen: {
     flex: 1,
+  },
+  container: {
+    flex: 1,
+  },
+  contentContainer: {
+    padding: 16,
+    gap: 16,
+    paddingBottom: 28,
+  },
+  galleryContainer: {
+    flex: 1,
+    padding: 16,
+  },
+  topSection: {
+    gap: 16,
+  },
+  topSectionWide: {
     flexDirection: "row",
-    borderWidth: 1,
-    borderColor: "#ccc",
-    borderRadius: 8,
+    alignItems: "flex-start",
+  },
+  modeColumn: {
+    flex: 1.4,
+  },
+  controlsPanel: {
+    flex: 0.9,
+    gap: 16,
+  },
+  preferenceRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  actionButtons: {
+    gap: 12,
+  },
+  actionButtonContent: {
+    paddingVertical: 8,
+  },
+  primaryButton: {
+    borderRadius: 18,
+    ...flatShadow,
+  },
+  secondaryButton: {
+    borderRadius: 18,
+    ...flatShadow,
+  },
+  outputSection: {
+    gap: 16,
+  },
+  outputSectionWide: {
+    flexDirection: "row",
+  },
+  bottomBar: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: "#2A3137",
+    backgroundColor: "#161A1D",
+    ...flatShadow,
   },
 });
 

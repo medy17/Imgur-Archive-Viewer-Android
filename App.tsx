@@ -1,24 +1,40 @@
 // App.tsx
 import React from "react";
-import { SafeAreaView, StatusBar, StyleSheet } from "react-native";
-import { NavigationContainer } from "@react-navigation/native";
+import { StatusBar, StyleSheet, View } from "react-native";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { PaperProvider } from "react-native-paper";
 import ImgurArchiveScreen from "./src/ImgurArchiveScreen";
+import { materialTheme } from "./src/theme/materialTheme";
 
 const App = () => {
   return (
-    <NavigationContainer>
-      <SafeAreaView style={styles.container}>
-        <StatusBar barStyle="dark-content" />
-        <ImgurArchiveScreen />
-      </SafeAreaView>
-    </NavigationContainer>
+    <SafeAreaProvider>
+      <PaperProvider theme={materialTheme}>
+        <SafeAreaView
+          style={styles.safeArea}
+          edges={["top", "left", "right", "bottom"]}
+        >
+          <StatusBar
+            barStyle="light-content"
+            backgroundColor={materialTheme.colors.surface}
+          />
+          <View style={styles.container}>
+            <ImgurArchiveScreen />
+          </View>
+        </SafeAreaView>
+      </PaperProvider>
+    </SafeAreaProvider>
   );
 };
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: materialTheme.colors.surface,
+  },
   container: {
     flex: 1,
-    backgroundColor: "#f0f0f0",
+    backgroundColor: materialTheme.colors.background,
   },
 });
 

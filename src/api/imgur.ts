@@ -1,6 +1,7 @@
 // src/api/imgur.ts
 import RNFS from "react-native-fs";
 import { DownloadResult } from "../types";
+import { ensureAppMediaDir } from "../utils/fileManager";
 
 // --- CONSTANTS FOR ROBUSTNESS ---
 const REQUEST_TIMEOUT = 20000; // 15 seconds, as you suggested
@@ -136,13 +137,12 @@ const findArchivedUrl = async (
  * This function remains largely the same, as the robustness is in findArchivedUrl.
  */
 export const downloadFromArchive = async (
-  // ... (this function's signature and logic remain the same)
   imgurId: string,
   useBestQuality: boolean,
   log: (message: string, color?: any) => void,
   abortSignal: AbortSignal,
+  onProgress?: (progress: number | null) => void,
 ): Promise<DownloadResult> => {
-  // ... (no changes needed inside this function)
   const extensionsToTry = useBestQuality ? PRIORITY_EXTENSIONS : EXTENSIONS;
   log(
     `Using ${useBestQuality ? "Best Quality" : "Quick Scan"} mode.`,
@@ -161,9 +161,10 @@ export const downloadFromArchive = async (
     }
 
     const { archiveUrl, fallbackExt } = findResult;
-    const downloadDir = RNFS.DownloadDirectoryPath;
+    const downloadDir = await ensureAppMediaDir();
     const tempPath = `${downloadDir}/${imgurId}-${Date.now()}.tmp`;
     let finalExt = fallbackExt;
+    onProgress?.(0);
 
     const download = RNFS.downloadFile({
       fromUrl: archiveUrl,
@@ -177,6 +178,19 @@ export const downloadFromArchive = async (
           finalExt = mappedExt;
         }
       },
+      progress: (res) => {
+        if (!res.contentLength) {
+          onProgress?.(null);
+          return;
+        }
+
+        const progress = Math.max(
+          0,
+          Math.min(1, res.bytesWritten / res.contentLength),
+        );
+        onProgress?.(progress);
+      },
+      progressDivider: 5,
     });
 
     const downloadResult = await download.promise;
@@ -193,13 +207,16 @@ export const downloadFromArchive = async (
     }
 
     await RNFS.moveFile(tempPath, outputPath);
+    onProgress?.(1);
 
     log(`Success! Saved to: ${outputPath}`, "green");
     return { success: true, path: outputPath };
   } catch (error: any) {
     if (abortSignal.aborted) {
+      onProgress?.(null);
       return { success: false, error: "Download cancelled by user." };
     }
+    onProgress?.(null);
     log(`Error for ID ${imgurId}: ${error.message}`, "red");
     return { success: false, error: error.message };
   }

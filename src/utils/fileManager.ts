@@ -8,6 +8,17 @@ import { Alert } from "react-native";
 import { LogEntry } from "../types";
 
 type LogFunction = (message: string, color?: LogEntry["color"]) => void;
+const APP_MEDIA_DIR = `${RNFS.DownloadDirectoryPath}/ImgurArchiveViewer`;
+
+export const getAppMediaDir = () => APP_MEDIA_DIR;
+
+export const ensureAppMediaDir = async () => {
+  const exists = await RNFS.exists(APP_MEDIA_DIR);
+  if (!exists) {
+    await RNFS.mkdir(APP_MEDIA_DIR);
+  }
+  return APP_MEDIA_DIR;
+};
 
 export const readBatchFile = async (
   log: LogFunction,
